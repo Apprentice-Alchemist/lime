@@ -20,5 +20,10 @@ abstract CairoFontFace(CFFIPointer) from CFFIPointer to CFFIPointer
 		return 0;
 		#end
 	}
+
+	@:op(A == B) function equals(other:CairoFontFace):Bool
+	{
+		return this == (other : CFFIPointer);
+	}
 }
 #end

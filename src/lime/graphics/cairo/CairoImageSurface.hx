@@ -86,5 +86,10 @@ import lime.utils.DataPointer;
 		return 0;
 		#end
 	}
+
+	@:op(A == B) function equals(other:CairoImageSurface):Bool
+	{
+		return this == (other : CFFIPointer);
+	}
 }
 #end

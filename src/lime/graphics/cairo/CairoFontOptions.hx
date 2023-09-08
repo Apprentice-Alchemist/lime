@@ -94,5 +94,10 @@ abstract CairoFontOptions(CFFIPointer) from CFFIPointer to CFFIPointer
 
 		return value;
 	}
+
+	@:op(A == B) function equals(other:CairoFontOptions):Bool
+	{
+		return this == (other : CFFIPointer);
+	}
 }
 #end

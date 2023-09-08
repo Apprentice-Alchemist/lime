@@ -13,5 +13,9 @@ abstract CairoSurface(CFFIPointer) from CFFIPointer to CFFIPointer
 		NativeCFFI.lime_cairo_surface_flush(this);
 		#end
 	}
+
+	@:op(A == B) function equals(other:CairoSurface):Bool {
+		return this == (other:CFFIPointer);
+	}
 }
 #end

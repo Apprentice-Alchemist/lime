@@ -145,5 +145,10 @@ abstract CairoPattern(CFFIPointer) from CFFIPointer to CFFIPointer
 
 		return value;
 	}
+
+	@:op(A == B) function equals(other:CairoPattern):Bool
+	{
+		return this == (other : CFFIPointer);
+	}
 }
 #end
