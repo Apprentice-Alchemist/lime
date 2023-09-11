@@ -1,4 +1,7 @@
+#include <atomic>
 #include <curl/curl.h>
+#include <curl/easy.h>
+#include <curl/multi.h>
 #include <system/CFFI.h>
 #include <system/CFFIPointer.h>
 #include <system/Mutex.h>
@@ -8,539 +11,223 @@
 #include <string.h>
 #include <map>
 #include <vector>
+#include <memory>
 
 
 namespace lime {
 
-
-	struct CURL_Progress {
-
-		double dltotal;
-		double dlnow;
-		double ultotal;
-		double ulnow;
-
-	};
-
-	struct CURL_XferInfo {
-
-		curl_off_t dltotal;
-		curl_off_t dlnow;
-		curl_off_t ultotal;
-		curl_off_t ulnow;
-
-	};
-
-	std::map<void*, std::vector<void*>* > curlMultiHandles;
-	std::map<void*, ValuePointer*> curlMultiObjects;
-	std::map<void*, void*> curlMultiReferences;
-	std::map<void*, int> curlMultiRunningHandles;
-	std::map<void*, bool> curlMultiValid;
-	std::map<CURL*, void*> curlObjects;
-	std::map<void*, bool> curlValid;
-	std::map<void*, ValuePointer*> headerCallbacks;
-	std::map<void*, curl_slist*> headerSLists;
-	std::map<void*, std::vector<char*>* > headerValues;
-	std::map<void*, ValuePointer*> progressCallbacks;
-	std::map<void*, CURL_Progress*> progressValues;
-	std::map<void*, Bytes*> readBytes;
-	std::map<void*, int> readBytesPosition;
-	std::map<void*, ValuePointer*> readBytesRoot;
-	// TODO: Switch to structs
-	std::map<void*, char*> writeBuffers;
-	std::map<void*, int> writeBufferPosition;
-	std::map<void*, int> writeBufferSize;
-	std::map<void*, Bytes*> writeBytes;
-	std::map<void*, ValuePointer*> writeBytesRoot;
-	std::map<void*, ValuePointer*> writeCallbacks;
-	std::map<void*, ValuePointer*> xferInfoCallbacks;
-	std::map<void*, CURL_XferInfo*> xferInfoValues;
 	Mutex curl_gc_mutex;
 
+        class CURLMultiData;
 
-	void gc_curl (value handle) {
+        class CURLData {
+        public:
+          std::atomic_int ref_count;
+          CURL *curl;
+          ValuePointer *headerCallback = nullptr;
+          ValuePointer *seekCallback = nullptr;
+          ValuePointer *progressCallback = nullptr;
+          ValuePointer *writeCallback = nullptr;
+          ValuePointer *xferInfoCallback = nullptr;
+		  ValuePointer* haxe_object = nullptr;
+          curl_slist *slist = nullptr;
+          CURLMultiData *multiHandle = nullptr;
 
-		if (!val_is_null (handle)) {
+          CURLData(ValuePointer *);
 
-			curl_gc_mutex.Lock ();
+          CURLData(CURLData *in, ValuePointer *);
 
-			if (curlMultiReferences.find (handle) != curlMultiReferences.end ()) {
+          ~CURLData();
 
-				value multi_handle = (value)curlMultiReferences[handle];
-				curl_multi_remove_handle ((CURLM*)val_data (multi_handle), (CURL*)val_data (handle));
-				curlMultiReferences.erase (handle);
+		 void DecRef();
 
-				std::vector<void*>* handles = curlMultiHandles[multi_handle];
+          static CURLData *fromCFFI(value val);
 
-				if (handles->size () > 0) {
+          static CURLData *fromCFFI(HL_CFFIPointer *val);
 
-					for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
+          static void gc_val(value val);
 
-						if (*it == handle) {
+          static void gc_hl(HL_CFFIPointer *val);
 
-							handles->erase (it);
-							delete curlMultiObjects[handle];
-							curlMultiObjects.erase (handle);
-							break;
+          value allocCFFI();
 
-						}
+          HL_CFFIPointer *allocCFFI_HL();
+        };
 
-					}
+        class CURLMultiData {
+        public:
+          //   std::atomic_int ref_count = 0;
+          CURLM *curlm;
+		  Mutex map_mutex;
+          std::map<CURL *, CURLData *> handles;
+		  int runningHandles = 0;
 
-				}
+          CURLMultiData() { curlm = curl_multi_init(); }
 
+		  ~CURLMultiData() {
+			curl_multi_cleanup(curlm);
+			map_mutex.Lock();
+			for (auto it = handles.begin (); it != handles.end (); ++it) {
+				it->second->multiHandle = nullptr;
+				it->second->DecRef();
 			}
+			map_mutex.Unlock();
+		  }
 
-			if (curlValid.find (handle) != curlValid.end ()) {
+          CURLMcode AddHandle(CURLData *data) {
+			data->ref_count++;
+			map_mutex.Lock();
+            handles[data->curl] = data;
+            map_mutex.Unlock();
+            data->multiHandle = this;
+            return curl_multi_add_handle(curlm, data->curl);
+          }
 
-				CURL* curl = (CURL*)val_data (handle);
+		  CURLMcode RemoveHandle(CURLData *data) {
+			data->DecRef();
+			map_mutex.Lock();
+			handles.erase(data->curl);
+			map_mutex.Unlock();
+			data->multiHandle = nullptr;
+			return curl_multi_remove_handle(curlm, data->curl);
+		  }
 
-				curlValid.erase (handle);
-				curlObjects.erase (curl);
-				curl_easy_cleanup (curl);
+		  CURLMcode Perform() {
+			return curl_multi_perform(curlm, &runningHandles);
+		  }
 
-				if (writeBuffers[handle]) {
 
-					free (writeBuffers[handle]);
+          static CURLMultiData *fromCFFI(value val) {
+            return (CURLMultiData *)val_data(val);
+          }
 
-				}
+          static CURLMultiData *fromCFFI(HL_CFFIPointer *val) {
+            return (CURLMultiData *)val->ptr;
+          }
 
-				writeBuffers.erase (handle);
-				writeBufferPosition.erase (handle);
-				writeBufferSize.erase (handle);
+          static void gc_val(value val) {
+            val_gc(val, nullptr);
+            CURLMultiData *data = (CURLMultiData *)val_data(val);
+            delete data;
+          }
 
-			}
+          static void gc_hl(HL_CFFIPointer *val) {
+            val->finalizer = NULL;
+            CURLMultiData *data = (CURLMultiData *)val->ptr;
+            delete data;
+          }
 
-			ValuePointer* callback;
-			Bytes* bytes;
-			ValuePointer* bytesRoot;
+          value allocCFFI() {
+            value v = cffi::alloc_pointer(this);
+            val_gc(v, gc_val);
+            return v;
+          }
 
-			if (headerCallbacks.find (handle) != headerCallbacks.end ()) {
+          HL_CFFIPointer *allocCFFI_HL() {
+            HL_CFFIPointer *ptr =
+                (HL_CFFIPointer *)hl_gc_alloc_finalizer(sizeof(HL_CFFIPointer));
+            ptr->finalizer = (void *)gc_hl;
+            return ptr;
+          }
+        };
 
-				callback = headerCallbacks[handle];
-				std::vector<char*>* values = headerValues[handle];
-				headerCallbacks.erase (handle);
-				headerValues.erase (handle);
-				delete callback;
-				delete values;
+        CURLData::CURLData(ValuePointer *obj) : haxe_object(obj) { curl = curl_easy_init(); }
 
-			}
+        CURLData::CURLData(CURLData *in,ValuePointer *obj) : haxe_object(obj) {
+          curl = curl_easy_duphandle(in->curl);
+          headerCallback =
+              in->headerCallback ? in->headerCallback->Clone() : nullptr;
+          seekCallback =
+              in->seekCallback ? in->seekCallback->Clone() : nullptr;
+          progressCallback =
+              in->progressCallback ? in->progressCallback->Clone() : nullptr;
+          writeCallback =
+              in->writeCallback ? in->writeCallback->Clone() : nullptr;
+          xferInfoCallback =
+              in->xferInfoCallback ? in->xferInfoCallback->Clone() : nullptr;
+        }
 
-			if (headerSLists.find (handle) != headerSLists.end ()) {
+        CURLData::~CURLData() {
+          delete headerCallback;
+          delete progressCallback;
+          delete writeCallback;
+          if (slist != nullptr) {
+            curl_slist_free_all(slist);
+          }
+          if (multiHandle) {
+            multiHandle->map_mutex.Lock();
+            curl_multi_remove_handle(multiHandle->curlm, curl);
+            multiHandle->handles.erase(curl);
+            multiHandle->map_mutex.Unlock();
+          }
+          curl_easy_cleanup(curl);
+        }
 
-				curl_slist* chunk = headerSLists[handle];
-				headerSLists.erase (handle);
-				curl_slist_free_all (chunk);
-
-			}
-
-			if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-				callback = progressCallbacks[handle];
-				CURL_Progress* progress = progressValues[handle];
-				progressCallbacks.erase (handle);
-				progressValues.erase (progress);
-				delete callback;
-				delete progress;
-
-			}
-
-			if (readBytes.find (handle) != readBytes.end ()) {
-
-				bytes = readBytes[handle];
-				bytesRoot = readBytesRoot[handle];
-				readBytes.erase (handle);
-				readBytesPosition.erase (handle);
-				readBytesRoot.erase (handle);
-				delete bytes;
-				delete bytesRoot;
-
-			}
-
-			if (writeCallbacks.find (handle) != writeCallbacks.end ()) {
-
-				callback = writeCallbacks[handle];
-				bytes = writeBytes[handle];
-				bytesRoot = writeBytesRoot[handle];
-				writeCallbacks.erase (handle);
-				writeBytes.erase (handle);
-				writeBytesRoot.erase (handle);
-				delete callback;
-				delete bytes;
-				delete bytesRoot;
-
-			}
-
-			if (xferInfoCallbacks.find (handle) != xferInfoCallbacks.end ()) {
-
-				callback = xferInfoCallbacks[handle];
-				CURL_XferInfo* info = xferInfoValues[handle];
-				xferInfoCallbacks.erase (handle);
-				xferInfoValues.erase (handle);
-				delete callback;
-				delete info;
-
-			}
-
-			val_gc (handle, 0);
-
-			curl_gc_mutex.Unlock ();
-
+		void CURLData::DecRef() {
+			this->ref_count--;
+          if (this->ref_count <= 0) {
+            delete this;
+          }
 		}
 
-	}
-
-
-	void hl_gc_curl (HL_CFFIPointer* handle) {
-
-		if (handle) {
-
-			curl_gc_mutex.Lock ();
-
-			if (curlMultiReferences.find (handle) != curlMultiReferences.end ()) {
-
-				HL_CFFIPointer* multi_handle = (HL_CFFIPointer*)curlMultiReferences[handle];
-				curl_multi_remove_handle ((CURLM*)multi_handle->ptr, (CURL*)handle->ptr);
-				curlMultiReferences.erase (handle);
-
-				std::vector<void*>* handles = curlMultiHandles[multi_handle];
-
-				if (handles->size () > 0) {
-
-					for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-						if (*it == handle) {
-
-							handles->erase (it);
-							delete curlMultiObjects[handle];
-							curlMultiObjects.erase (handle);
-							break;
-
-						}
-
-					}
-
-				}
-
-			}
-
-			if (curlValid.find (handle) != curlValid.end ()) {
-
-				CURL* curl = (CURL*)handle->ptr;
-
-				curlValid.erase (handle);
-				curlObjects.erase (curl);
-				curl_easy_cleanup (curl);
-
-				if (writeBuffers[handle]) {
-
-					free (writeBuffers[handle]);
-
-				}
-
-				writeBuffers.erase (handle);
-				writeBufferPosition.erase (handle);
-				writeBufferSize.erase (handle);
-
-			}
-
-			ValuePointer* callback;
-			Bytes* bytes;
-			ValuePointer* bytesRoot;
-
-			if (headerCallbacks.find (handle) != headerCallbacks.end ()) {
-
-				callback = headerCallbacks[handle];
-				std::vector<char*>* values = headerValues[handle];
-				headerCallbacks.erase (handle);
-				headerValues.erase (handle);
-				delete callback;
-				delete values;
-
-			}
-
-			if (headerSLists.find (handle) != headerSLists.end ()) {
-
-				curl_slist* chunk = headerSLists[handle];
-				headerSLists.erase (handle);
-				curl_slist_free_all (chunk);
-
-			}
-
-			if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-				callback = progressCallbacks[handle];
-				CURL_Progress* progress = progressValues[handle];
-				progressCallbacks.erase (handle);
-				progressValues.erase (progress);
-				delete callback;
-				delete progress;
-
-			}
-
-			if (readBytes.find (handle) != readBytes.end ()) {
-
-				bytes = readBytes[handle];
-				bytesRoot = readBytesRoot[handle];
-				readBytes.erase (handle);
-				readBytesPosition.erase (handle);
-				readBytesRoot.erase (handle);
-				delete bytesRoot;
-
-			}
-
-			if (writeCallbacks.find (handle) != writeCallbacks.end ()) {
-
-				callback = writeCallbacks[handle];
-				bytes = writeBytes[handle];
-				bytesRoot = writeBytesRoot[handle];
-				writeCallbacks.erase (handle);
-				writeBytes.erase (handle);
-				writeBytesRoot.erase (handle);
-				delete callback;
-				delete bytesRoot;
-
-			}
-
-			if (xferInfoCallbacks.find (handle) != xferInfoCallbacks.end ()) {
-
-				callback = xferInfoCallbacks[handle];
-				CURL_XferInfo* info = xferInfoValues[handle];
-				xferInfoCallbacks.erase (handle);
-				xferInfoValues.erase (handle);
-				delete callback;
-				delete info;
-
-			}
-
-			handle->finalizer = NULL;
-
-			curl_gc_mutex.Unlock ();
-
-		}
-
-	}
-
-
-	void gc_curl_multi (value handle) {
-
-		if (!val_is_null (handle)) {
-
-			curl_gc_mutex.Lock ();
-
-			if (curlMultiValid.find (handle) != curlMultiValid.end ()) {
-
-				curlMultiValid.erase (handle);
-				curl_multi_cleanup ((CURLM*)val_data(handle));
-
-			}
-
-			std::vector<void*>* handles = curlMultiHandles[handle];
-
-			for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-				delete curlMultiObjects[*it];
-				curlMultiObjects.erase (*it);
-
-				curl_gc_mutex.Unlock ();
-				gc_curl ((value)*it);
-				curl_gc_mutex.Lock ();
-
-			}
-
-			delete curlMultiHandles[handle];
-			curlMultiHandles.erase (handle);
-
-			val_gc (handle, 0);
-			//handle = alloc_null ();
-
-			curl_gc_mutex.Unlock ();
-
-		}
-
-	}
-
-
-	void hl_gc_curl_multi (HL_CFFIPointer* handle) {
-
-		if (handle) {
-
-			curl_gc_mutex.Lock ();
-
-			if (curlMultiValid.find (handle) != curlMultiValid.end ()) {
-
-				curlMultiValid.erase (handle);
-				curl_multi_cleanup ((CURLM*)handle->ptr);
-
-			}
-
-			std::vector<void*>* handles = curlMultiHandles[handle];
-
-			for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-				delete curlMultiObjects[*it];
-				curlMultiObjects.erase (*it);
-
-				curl_gc_mutex.Unlock ();
-				hl_gc_curl ((HL_CFFIPointer*)*it);
-				curl_gc_mutex.Lock ();
-
-			}
-
-			delete curlMultiHandles[handle];
-			curlMultiHandles.erase (handle);
-
-			handle->finalizer = NULL;
-			//handle = alloc_null ();
-
-			curl_gc_mutex.Unlock ();
-
-		}
-
-	}
-
+        CURLData *CURLData::fromCFFI(value val) {
+          return (CURLData *)val_data(val);
+        }
+
+        CURLData *CURLData::fromCFFI(HL_CFFIPointer *val) {
+          return (CURLData *)val->ptr;
+        }
+
+        void CURLData::gc_val(value val) {
+          val_gc(val, nullptr);
+          CURLData *data = (CURLData *)val_data(val);
+          data->DecRef();
+        }
+
+        void CURLData::gc_hl(HL_CFFIPointer *val) {
+          val->finalizer = NULL;
+          CURLData *data = (CURLData *)val->ptr;
+          data->DecRef();
+        }
+
+        value CURLData::allocCFFI() {
+          this->ref_count++;
+          value v = cffi::alloc_pointer(this);
+          val_gc(v, gc_val);
+          return v;
+        }
+
+        HL_CFFIPointer *CURLData::allocCFFI_HL() {
+          ref_count++;
+          HL_CFFIPointer *ptr =
+              (HL_CFFIPointer *)hl_gc_alloc_finalizer(sizeof(HL_CFFIPointer));
+          ptr->finalizer = (void *)gc_hl;
+          return ptr;
+        }
 
 	void lime_curl_easy_cleanup (value handle) {
-
-		gc_curl (handle);
-
+		delete CURLData::fromCFFI(handle);
 	}
 
 
 	HL_PRIM void HL_NAME(hl_curl_easy_cleanup) (HL_CFFIPointer* handle) {
+		delete CURLData::fromCFFI(handle);
+	}
 
-		hl_gc_curl (handle);
+
+	value lime_curl_easy_duphandle (value handle, value haxe_object) {
+
+		CURLData *data = CURLData::fromCFFI(handle);
+		return (new CURLData(data, new ValuePointer(haxe_object)))->allocCFFI();
 
 	}
 
 
-	value lime_curl_easy_duphandle (value handle) {
+	HL_PRIM HL_CFFIPointer* HL_NAME(hl_curl_easy_duphandle) (HL_CFFIPointer* handle, vdynamic *haxe_object) {
 
-		curl_gc_mutex.Lock ();
+		CURLData *data = CURLData::fromCFFI(handle);
+		return (new CURLData(data, new ValuePointer(haxe_object)))->allocCFFI_HL();
 
-		CURL* dup = curl_easy_duphandle ((CURL*)val_data(handle));
-		value duphandle = CFFIPointer (dup, gc_curl);
-		curlValid[duphandle] = true;
-		curlObjects[dup] = duphandle;
-
-		value callbackValue;
-		Bytes* bytes;
-		value bytesValue;
-
-		if (headerCallbacks.find (handle) != headerCallbacks.end ()) {
-
-			callbackValue = (value)headerCallbacks[handle]->Get ();
-			headerCallbacks[duphandle] = new ValuePointer (callbackValue);
-			headerValues[duphandle] = new std::vector<char*> ();
-
-		}
-
-		if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-			callbackValue = (value)progressCallbacks[handle]->Get ();
-			progressCallbacks[duphandle] = new ValuePointer (callbackValue);
-			progressValues[duphandle] = new CURL_Progress ();
-
-		}
-
-		if (readBytes.find (handle) != readBytes.end ()) {
-
-			bytesValue = (value)readBytesRoot[handle]->Get ();
-			bytes = new Bytes (bytesValue);
-			readBytes[duphandle] = bytes;
-			readBytesPosition[duphandle] = 0;
-			readBytesRoot[duphandle] = new ValuePointer (bytesValue);
-
-		}
-
-		if (writeCallbacks.find (handle) != writeCallbacks.end ()) {
-
-			callbackValue = (value)writeCallbacks[handle]->Get ();
-			bytesValue = (value)writeBytesRoot[handle]->Get ();
-			bytes = new Bytes (bytesValue);
-			writeCallbacks[duphandle] = new ValuePointer (callbackValue);
-			writeBuffers[duphandle] = NULL;
-			writeBufferPosition[duphandle] = 0;
-			writeBufferSize[duphandle] = 0;
-			writeBytes[duphandle] = bytes;
-			writeBytesRoot[duphandle] = new ValuePointer (bytesValue);
-
-		}
-
-		if (xferInfoCallbacks.find (handle) != xferInfoCallbacks.end ()) {
-
-			callbackValue = (value)xferInfoCallbacks[handle]->Get ();
-			xferInfoCallbacks[duphandle] = new ValuePointer (callbackValue);
-			xferInfoValues[duphandle] = new CURL_XferInfo ();
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
-		return duphandle;
-
-	}
-
-
-	HL_PRIM HL_CFFIPointer* HL_NAME(hl_curl_easy_duphandle) (HL_CFFIPointer* handle) {
-
-		curl_gc_mutex.Lock ();
-
-		CURL* dup = curl_easy_duphandle ((CURL*)handle->ptr);
-		HL_CFFIPointer* duphandle = HLCFFIPointer (dup, (hl_finalizer)hl_gc_curl);
-		curlValid[duphandle] = true;
-		curlObjects[dup] = duphandle;
-
-		vclosure* callbackValue;
-		Bytes* bytes;
-
-		if (headerCallbacks.find (handle) != headerCallbacks.end ()) {
-
-			callbackValue = (vclosure*)headerCallbacks[handle]->Get ();
-			headerCallbacks[duphandle] = new ValuePointer (callbackValue);
-			headerValues[duphandle] = new std::vector<char*> ();
-
-		}
-
-		if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-			callbackValue = (vclosure*)progressCallbacks[handle]->Get ();
-			progressCallbacks[duphandle] = new ValuePointer (callbackValue);
-			progressValues[duphandle] = new CURL_Progress ();
-
-		}
-
-		if (readBytes.find (handle) != readBytes.end ()) {
-
-			readBytes[duphandle] = readBytes[handle];
-			readBytesPosition[duphandle] = 0;
-			readBytesRoot[duphandle] = new ValuePointer ((vobj*)readBytes[handle]);
-
-		}
-
-		if (writeCallbacks.find (handle) != writeCallbacks.end ()) {
-
-			callbackValue = (vclosure*)writeCallbacks[handle]->Get ();
-			writeCallbacks[duphandle] = new ValuePointer (callbackValue);
-			writeBuffers[duphandle] = NULL;
-			writeBufferPosition[duphandle] = 0;
-			writeBufferSize[duphandle] = 0;
-			writeBytes[duphandle] = writeBytes[handle];
-			writeBytesRoot[duphandle] = new ValuePointer ((vobj*)writeBytes[handle]);
-
-		}
-
-		if (xferInfoCallbacks.find (handle) != xferInfoCallbacks.end ()) {
-
-			callbackValue = (vclosure*)xferInfoCallbacks[handle]->Get ();
-			xferInfoCallbacks[duphandle] = new ValuePointer (callbackValue);
-			xferInfoValues[duphandle] = new CURL_XferInfo ();
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
-		return duphandle;
 
 	}
 
@@ -563,231 +250,10 @@ namespace lime {
 
 	void lime_curl_easy_flush (value easy_handle) {
 
-		curl_gc_mutex.Lock ();
-		int code;
-
-		if (headerCallbacks.find (easy_handle) != headerCallbacks.end ()) {
-
-			ValuePointer* headerCallback = headerCallbacks[easy_handle];
-			std::vector<char*>* values = headerValues[easy_handle];
-
-			if (values->size () > 0) {
-
-				for (std::vector<char*>::iterator it = values->begin (); it != values->end (); ++it) {
-
-					curl_gc_mutex.Unlock ();
-					headerCallback->Call (alloc_string (*it));
-					curl_gc_mutex.Lock ();
-
-				}
-
-				values->clear ();
-
-			}
-
-		}
-
-		if (writeBuffers.find (easy_handle) != writeBuffers.end ()) {
-
-			char* buffer = writeBuffers[easy_handle];
-			int position = writeBufferPosition[easy_handle];
-			int length = writeBufferSize[easy_handle];
-
-			if (buffer && position > 0) {
-
-				if (writeCallbacks.find (easy_handle) != writeCallbacks.end ()) {
-
-					ValuePointer* writeCallback = writeCallbacks[easy_handle];
-					ValuePointer* bytesRoot = writeBytesRoot[easy_handle];
-
-					Bytes* bytes = writeBytes[easy_handle];
-					if (bytes->length < position) bytes->Resize (position);
-					memcpy ((char*)bytes->b, buffer, position);
-					// free (buffer);
-					// writeBuffers[easy_handle] = NULL;
-					// writeBufferSize[easy_handle] = 0;
-					writeBufferPosition[easy_handle] = 0;
-
-					value _bytes = bytes->Value ((value)bytesRoot->Get ());
-
-					curl_gc_mutex.Unlock ();
-					length = val_int ((value)writeCallback->Call (_bytes, alloc_int (position)));
-					curl_gc_mutex.Lock ();
-
-					if (length == CURL_WRITEFUNC_PAUSE) {
-
-						// TODO: Handle pause
-
-					}
-
-				}
-
-			}
-
-		}
-
-		if (progressCallbacks.find (easy_handle) != progressCallbacks.end ()) {
-
-			CURL_Progress* progress = progressValues[easy_handle];
-			ValuePointer* progressCallback = progressCallbacks[easy_handle];
-
-			curl_gc_mutex.Unlock ();
-			code = val_int ((value)progressCallback->Call (alloc_float (progress->dltotal), alloc_float (progress->dlnow), alloc_float (progress->ultotal), alloc_float (progress->ulnow)));
-			curl_gc_mutex.Lock ();
-
-			if (code != 0) { // CURLE_OK
-
-				// TODO: Abort
-
-			}
-
-		}
-
-		if (xferInfoCallbacks.find (easy_handle) != xferInfoCallbacks.end ()) {
-
-			CURL_XferInfo* xferInfo = xferInfoValues[easy_handle];
-			ValuePointer* xferInfoCallback = xferInfoCallbacks[easy_handle];
-
-			curl_gc_mutex.Unlock ();
-			code = val_int ((value)xferInfoCallback->Call (alloc_int (xferInfo->dltotal), alloc_int (xferInfo->dlnow), alloc_int (xferInfo->ultotal), alloc_int (xferInfo->ulnow)));
-			curl_gc_mutex.Lock ();
-
-			if (code != 0) {
-
-				// TODO: Abort
-
-			}
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
 	}
 
 
 	HL_PRIM void HL_NAME(hl_curl_easy_flush) (HL_CFFIPointer* easy_handle) {
-
-		curl_gc_mutex.Lock ();
-		int code;
-
-		if (headerCallbacks.find (easy_handle) != headerCallbacks.end ()) {
-
-			ValuePointer* headerCallback = headerCallbacks[easy_handle];
-			std::vector<char*>* values = headerValues[easy_handle];
-
-			if (values->size () > 0) {
-
-				for (std::vector<char*>::iterator it = values->begin (); it != values->end (); ++it) {
-
-					vdynamic* bytes = hl_alloc_dynamic (&hlt_bytes);
-					bytes->v.bytes = (vbyte*)*it;
-
-					curl_gc_mutex.Unlock ();
-					headerCallback->Call (bytes);
-					curl_gc_mutex.Lock ();
-
-				}
-
-				values->clear ();
-
-			}
-
-		}
-
-		if (writeBuffers.find (easy_handle) != writeBuffers.end ()) {
-
-			char* buffer = writeBuffers[easy_handle];
-			int position = writeBufferPosition[easy_handle];
-			int length = writeBufferSize[easy_handle];
-
-			if (buffer && position > 0) {
-
-				if (writeCallbacks.find (easy_handle) != writeCallbacks.end ()) {
-
-					ValuePointer* writeCallback = writeCallbacks[easy_handle];
-
-					Bytes* bytes = writeBytes[easy_handle];
-					if (bytes->length < position) bytes->Resize (position);
-					memcpy ((char*)bytes->b, buffer, position);
-					// free (buffer);
-					// writeBuffers[easy_handle] = NULL;
-					// writeBufferSize[easy_handle] = 0;
-					writeBufferPosition[easy_handle] = 0;
-
-					vdynamic* pos = hl_alloc_dynamic (&hlt_i32);
-					pos->v.i = position;
-
-					curl_gc_mutex.Unlock ();
-					length = *((int*)writeCallback->Call (bytes, pos));
-					curl_gc_mutex.Lock ();
-
-					if (length == CURL_WRITEFUNC_PAUSE) {
-
-						// TODO: Handle pause
-
-					}
-
-				}
-
-			}
-
-		}
-
-		if (progressCallbacks.find (easy_handle) != progressCallbacks.end ()) {
-
-			CURL_Progress* progress = progressValues[easy_handle];
-			ValuePointer* progressCallback = progressCallbacks[easy_handle];
-
-			vdynamic* dltotal = hl_alloc_dynamic (&hlt_f64);
-			vdynamic* dlnow = hl_alloc_dynamic (&hlt_f64);
-			vdynamic* ultotal = hl_alloc_dynamic (&hlt_f64);
-			vdynamic* ulnow = hl_alloc_dynamic (&hlt_f64);
-
-			dltotal->v.d = progress->dltotal;
-			dlnow->v.d = progress->dlnow;
-			ultotal->v.d = progress->ultotal;
-			ulnow->v.d = progress->ulnow;
-
-			curl_gc_mutex.Unlock ();
-			code = *((int*)progressCallback->Call (dltotal, dlnow, ultotal, ulnow));
-			curl_gc_mutex.Lock ();
-
-			if (code != 0) { // CURLE_OK
-
-				// TODO: Abort
-
-			}
-
-		}
-
-		if (xferInfoCallbacks.find (easy_handle) != xferInfoCallbacks.end ()) {
-
-			CURL_XferInfo* xferInfo = xferInfoValues[easy_handle];
-			ValuePointer* xferInfoCallback = xferInfoCallbacks[easy_handle];
-
-			vdynamic* dltotal = hl_alloc_dynamic (&hlt_i32);
-			vdynamic* dlnow = hl_alloc_dynamic (&hlt_i32);
-			vdynamic* ultotal = hl_alloc_dynamic (&hlt_i32);
-			vdynamic* ulnow = hl_alloc_dynamic (&hlt_i32);
-
-			dltotal->v.i = xferInfo->dltotal;
-			dlnow->v.i = xferInfo->dlnow;
-			ultotal->v.i = xferInfo->ultotal;
-			ulnow->v.i = xferInfo->ulnow;
-
-			curl_gc_mutex.Unlock ();
-			code = *((int*)xferInfoCallback->Call (dltotal, dlnow, ultotal, ulnow));
-			curl_gc_mutex.Lock ();
-
-			if (code != 0) {
-
-				// TODO: Abort
-
-			}
-
-		}
-
-		curl_gc_mutex.Unlock ();
 
 	}
 
@@ -1026,119 +492,26 @@ namespace lime {
 
 	}
 
-
-	value lime_curl_easy_init () {
-
-		curl_gc_mutex.Lock ();
-
-		CURL* curl = curl_easy_init ();
-		value handle = CFFIPointer (curl, gc_curl);
-
-		if (curlValid.find (handle) != curlValid.end ()) {
-
-			printf ("Error: Duplicate cURL handle\n");
-
-		}
-
-		if (headerCallbacks.find (handle) != headerCallbacks.end ()) {
-
-			printf ("Error: cURL handle already has a header callback\n");
-
-		}
-
-		if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-			printf ("Error: cURL handle already has a progress callback\n");
-
-		}
-
-		if (readBytes.find (handle) != readBytes.end ()) {
-
-			printf ("Error: cURL handle already has a read data value\n");
-
-		}
-
-		if (writeCallbacks.find (handle) != writeCallbacks.end ()) {
-
-			printf ("Error: cURL handle already has a write callback\n");
-
-		}
-
-		curlValid[handle] = true;
-		curlObjects[curl] = handle;
-
-		writeBuffers[handle] = NULL;
-		writeBufferPosition[handle] = 0;
-		writeBufferSize[handle] = 0;
-
-		curl_gc_mutex.Unlock ();
-
-		return handle;
-
+	value lime_curl_easy_init (value obj) {
+		return (new CURLData(new ValuePointer(obj)))->allocCFFI();
 	}
 
 
-	HL_PRIM HL_CFFIPointer* HL_NAME(hl_curl_easy_init) () {
-
-		curl_gc_mutex.Lock ();
-
-		CURL* curl = curl_easy_init ();
-		HL_CFFIPointer* handle = HLCFFIPointer (curl, (hl_finalizer)hl_gc_curl);
-
-		if (curlValid.find (handle) != curlValid.end ()) {
-
-			printf ("Error: Duplicate cURL handle\n");
-
-		}
-
-		if (headerCallbacks.find (handle) != headerCallbacks.end ()) {
-
-			printf ("Error: cURL handle already has a header callback\n");
-
-		}
-
-		if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-			printf ("Error: cURL handle already has a progress callback\n");
-
-		}
-
-		if (readBytes.find (handle) != readBytes.end ()) {
-
-			printf ("Error: cURL handle already has a read data value\n");
-
-		}
-
-		if (writeCallbacks.find (handle) != writeCallbacks.end ()) {
-
-			printf ("Error: cURL handle already has a write callback\n");
-
-		}
-
-		curlValid[handle] = true;
-		curlObjects[curl] = handle;
-
-		writeBuffers[handle] = NULL;
-		writeBufferPosition[handle] = 0;
-		writeBufferSize[handle] = 0;
-
-		curl_gc_mutex.Unlock ();
-
-		return handle;
-
+	HL_PRIM HL_CFFIPointer* HL_NAME(hl_curl_easy_init) (vdynamic *obj) {
+		return (new CURLData(new ValuePointer(obj)))->allocCFFI_HL();
 	}
 
 
 	int lime_curl_easy_pause (value handle, int bitmask) {
 
-		return curl_easy_pause ((CURL*)val_data(handle), bitmask);
+		return curl_easy_pause (CURLData::fromCFFI(handle)->curl, bitmask);
 
 	}
 
 
 	HL_PRIM int HL_NAME(hl_curl_easy_pause) (HL_CFFIPointer* handle, int bitmask) {
 
-		return curl_easy_pause ((CURL*)handle->ptr, bitmask);
+		return curl_easy_pause (CURLData::fromCFFI(handle)->curl, bitmask);
 
 	}
 
@@ -1148,11 +521,9 @@ namespace lime {
 		int code;
 		System::GCEnterBlocking ();
 
-		code = curl_easy_perform ((CURL*)val_data(easy_handle));
+		code = curl_easy_perform (CURLData::fromCFFI(easy_handle)->curl);
 
 		System::GCExitBlocking ();
-
-		lime_curl_easy_flush (easy_handle);
 
 		return code;
 
@@ -1162,13 +533,11 @@ namespace lime {
 	HL_PRIM int HL_NAME(hl_curl_easy_perform) (HL_CFFIPointer* easy_handle) {
 
 		int code;
-		System::GCEnterBlocking ();
+		hl_blocking(true);
 
-		code = curl_easy_perform ((CURL*)easy_handle->ptr);
+		code = curl_easy_perform (CURLData::fromCFFI(easy_handle)->curl);
 
-		System::GCExitBlocking ();
-
-		lime_hl_curl_easy_flush (easy_handle);
+		hl_blocking(false);
 
 		return code;
 
@@ -1193,16 +562,16 @@ namespace lime {
 	}
 
 
-	void lime_curl_easy_reset (value curl) {
+	void lime_curl_easy_reset (value handle) {
 
-		curl_easy_reset ((CURL*)val_data(curl));
+		curl_easy_reset (CURLData::fromCFFI(handle)->curl);
 
 	}
 
 
 	HL_PRIM void HL_NAME(hl_curl_easy_reset) (HL_CFFIPointer* curl) {
 
-		curl_easy_reset ((CURL*)curl->ptr);
+		curl_easy_reset (CURLData::fromCFFI(curl)->curl);
 
 	}
 
@@ -1225,18 +594,32 @@ namespace lime {
 	}
 
 
+	static vdynamic *hl_alloc_int(int i) {
+		vdynamic *v = hl_alloc_dynamic(&hlt_i32);
+		v->v.i = i;
+		return v;
+	}
+
+	static vdynamic *hl_alloc_double(double d) {
+		vdynamic *v = hl_alloc_dynamic(&hlt_f64);
+		v->v.d = d;
+		return v;
+	}
+
+
+
 	static size_t header_callback (void *ptr, size_t size, size_t nmemb, void *userp) {
 
-		std::vector<char*>* values = headerValues[userp];
+		// std::vector<char*>* values = headerValues[userp];
 
-		if (size * nmemb > 0) {
+		// if (size * nmemb > 0) {
 
-			char* data = (char*)malloc (size * nmemb + 1);
-			memcpy (data, ptr, size * nmemb);
-			data[size * nmemb] = '\0';
-			values->push_back (data);
+		// 	char* data = (char*)malloc (size * nmemb + 1);
+		// 	memcpy (data, ptr, size * nmemb);
+		// 	data[size * nmemb] = '\0';
+		// 	values->push_back (data);
 
-		}
+		// }
 
 		return size * nmemb;
 
@@ -1244,111 +627,146 @@ namespace lime {
 
 
 	static size_t write_callback (void *ptr, size_t size, size_t nmemb, void *userp) {
+		CURLData *data = (CURLData*)userp;
 
-		if (size * nmemb < 1) {
-
+		if(!data || !data->writeCallback || !data->writeCallback->Get()) {
 			return 0;
-
 		}
 
-		char* buffer = writeBuffers[userp];
-		int writeSize = (size * nmemb);
-
-		if (!buffer) {
-
-			buffer = (char*)malloc (CURL_MAX_WRITE_SIZE);
-			memcpy (buffer, ptr, writeSize);
-			writeBuffers[userp] = buffer;
-			writeBufferPosition[userp] = writeSize;
-			writeBufferSize[userp] = CURL_MAX_WRITE_SIZE;
-
+		if(data->writeCallback->IsHLValue()) {
+			vclosure *cb = (vclosure*)data->writeCallback->Get();
+			size_t len = size * nmemb;
+			vbyte *data = hl_alloc_bytes(len);
+			memcpy(data, ptr, len);
+			vdynamic *db = hl_alloc_dynamic(&hlt_bytes);
+			db->v.bytes = data;
+			vdynamic *args[] = {
+				db,
+				hl_alloc_int(len),
+			};
+			return hl_dyn_call(cb, args, 2)->v.i;
 		} else {
-
-			int position = writeBufferPosition[userp];
-			int currentSize = writeBufferSize[userp];
-
-			if (position + writeSize > currentSize) {
-
-				int newSize = currentSize;
-				while (newSize < position + writeSize) newSize += CURL_MAX_WRITE_SIZE;
-
-				buffer = (char*)realloc (buffer, newSize);
-				writeBufferSize[userp] = newSize;
-				writeBuffers[userp] = buffer;
-
-			}
-
-			memcpy (buffer + position, ptr, writeSize);
-			writeBufferPosition[userp] = position + writeSize;
-
+			size_t len = size * nmemb;
+			buffer buf = alloc_buffer_len(len);
+			buffer_append_sub(buf, (const char*)ptr, len);
+			value val = buffer_to_string(buf);
+			value cb = (value)data->writeCallback->Get();
+			value args[] = {
+				val,
+				alloc_int(len),
+			};
+			return val_int(val_callN(cb, args, 2));
 		}
-
-		return writeSize;
-
 	}
 
 	static int seek_callback (void *userp, curl_off_t offset, int origin) {
-		if (origin == SEEK_SET)  {
-			readBytesPosition[userp] = offset;
-			return CURL_SEEKFUNC_OK;
+		CURLData *data = (CURLData*)userp;
+
+		if(!data || !data->seekCallback) {
+			return 0;
 		}
-		return CURL_SEEKFUNC_CANTSEEK;
+
+		if(!data->seekCallback->Get()) {
+			return 0;
+		}
+
+		if(data->seekCallback->IsHLValue()) {
+			vclosure *cb = (vclosure*)data->seekCallback->Get();
+						vdynamic *args[] = {
+				hl_alloc_int(offset),
+				hl_alloc_int(origin),
+			};
+			return hl_dyn_call(cb, args, 2)->v.i;
+		} else {
+			value cb  = (value)data->seekCallback->Get();
+			value args[] = {
+				alloc_int(offset),
+				alloc_int(origin),
+			};
+			return val_int(val_callN(cb, args, 2));
+		}
 	}
 
 	static size_t read_callback (void *buffer, size_t size, size_t nmemb, void *userp) {
-
-		Bytes* bytes = readBytes[userp];
-		int position = readBytesPosition[userp];
-		int length = size * nmemb;
-
-		if (bytes->length < position + length) {
-
-			length = bytes->length - position;
-
-		}
-
-		if (length <= 0) return 0;
-
-		memcpy (buffer, bytes->b + position, length);
-		readBytesPosition[userp] = position + length;
-
-		return length;
-
+		// TODO
+		return 0;
 	}
-
 
 	static int progress_callback (void *userp, double dltotal, double dlnow, double ultotal, double ulnow) {
 
-		CURL_Progress* progress = progressValues[userp];
+		CURLData *data = (CURLData*)userp;
 
-		progress->dltotal = dltotal;
-		progress->dlnow = dlnow;
-		progress->ultotal = ultotal;
-		progress->ulnow = ulnow;
+		if(!data) {
+			return 0;
+		}
 
-		return 0;
+		if(!data->progressCallback->Get()) {
+			return 0;
+		}
+
+		if(data->progressCallback->IsHLValue()) {
+			vclosure *cb = (vclosure*)data->progressCallback->Get();
+			vdynamic *args[] = {
+				hl_alloc_double(dltotal),
+				hl_alloc_double(dlnow),
+				hl_alloc_double(ultotal),
+				hl_alloc_double(ulnow),
+			};
+			return hl_dyn_call(cb, args, 4)->v.i;
+		} else {
+			value cb  = (value)data->progressCallback->Get();
+			value args[] = {
+				alloc_float(dltotal),
+				alloc_float(dlnow),
+				alloc_float(ultotal),
+				alloc_float(ulnow),
+			};
+			return val_int(val_callN(cb, args, 4));
+		}
 
 	}
 
 
 	static int xferinfo_callback (void *userp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
 
-		CURL_XferInfo* xferInfo = xferInfoValues[userp];
+		CURLData *data = (CURLData*)userp;
 
-		xferInfo->dltotal = dltotal;
-		xferInfo->dlnow = dlnow;
-		xferInfo->ultotal = ultotal;
-		xferInfo->ulnow = ulnow;
+		if(!data) {
+			return 0;
+		}
 
-		return 0;
+		if(!data->xferInfoCallback->Get()) {
+			return 0;
+		}
+
+		if(data->xferInfoCallback->IsHLValue()) {
+			vclosure *cb = (vclosure*)data->xferInfoCallback->Get();
+			vdynamic *args[] = {
+				hl_alloc_int(dltotal),
+				hl_alloc_int(dlnow),
+				hl_alloc_int(ultotal),
+				hl_alloc_int(ulnow),
+			};
+			return hl_dyn_call(cb, args, 4)->v.i;
+        } else {
+			value cb  = (value)data->xferInfoCallback->Get();
+			value args[] = {
+				alloc_int(dltotal),
+				alloc_int(dlnow),
+				alloc_int(ultotal),
+				alloc_int(ulnow),
+			};
+			return val_int(val_callN(cb, args, 4));
+		}
 
 	}
 
 
 	int lime_curl_easy_setopt (value handle, int option, value parameter, value bytes) {
 
+		CURLData *data = CURLData::fromCFFI(handle);
 		CURLcode code = CURLE_OK;
-		CURL* easy_handle = (CURL*)val_data(handle);
+		// CURL* easy_handle = (CURL*)val_data(handle);
 		CURLoption type = (CURLoption)option;
 
 		switch (type) {
@@ -1403,7 +821,7 @@ namespace lime {
 			case CURLOPT_SUPPRESS_CONNECT_HEADERS:
 			case CURLOPT_SSH_COMPRESSION:
 
-				code = curl_easy_setopt (easy_handle, type, val_bool (parameter));
+				code = curl_easy_setopt (data->curl, type, val_bool (parameter));
 				break;
 
 			case CURLOPT_SSL_VERIFYHOST:
@@ -1469,7 +887,7 @@ namespace lime {
 			case CURLOPT_PROXY_SSL_OPTIONS:
 			case CURLOPT_SOCKS5_AUTH:
 
-				code = curl_easy_setopt (easy_handle, type, val_int (parameter));
+				code = curl_easy_setopt (data->curl, type, val_int (parameter));
 				break;
 
 			case CURLOPT_POSTFIELDSIZE_LARGE:
@@ -1479,7 +897,7 @@ namespace lime {
 			case CURLOPT_MAX_SEND_SPEED_LARGE:
 			case CURLOPT_MAX_RECV_SPEED_LARGE:
 
-				code = curl_easy_setopt (easy_handle, type, val_float (parameter));
+				code = curl_easy_setopt (data->curl, type, val_float (parameter));
 				break;
 
 			case CURLOPT_ERRORBUFFER:
@@ -1561,7 +979,7 @@ namespace lime {
 			case CURLOPT_ABSTRACT_UNIX_SOCKET:
 			case CURLOPT_REQUEST_TARGET:
 
-				code = curl_easy_setopt (easy_handle, type, val_string (parameter));
+				code = curl_easy_setopt (data->curl, type, val_string (parameter));
 				break;
 
 			case CURLOPT_IOCTLFUNCTION:
@@ -1629,23 +1047,11 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (readBytes.find (handle) == readBytes.end ()) {
-
-					delete readBytes[handle];
-					delete readBytesRoot[handle];
-
-				}
-
-				Bytes* _readBytes = new Bytes (bytes);
-				readBytes[handle] = _readBytes;
-				readBytesPosition[handle] = 0;
-				readBytesRoot[handle] = new ValuePointer (bytes);
-
 				// seek function is needed to support redirects
-				curl_easy_setopt (easy_handle, CURLOPT_SEEKFUNCTION, seek_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_SEEKDATA, handle);
-				code = curl_easy_setopt (easy_handle, CURLOPT_READFUNCTION, read_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_READDATA, handle);
+				curl_easy_setopt (data->curl, CURLOPT_SEEKFUNCTION, seek_callback);
+				curl_easy_setopt (data->curl, CURLOPT_SEEKDATA, data);
+				code = curl_easy_setopt (data->curl, CURLOPT_READFUNCTION, read_callback);
+				curl_easy_setopt (data->curl, CURLOPT_READDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -1654,22 +1060,8 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (writeCallbacks.find (handle) == writeCallbacks.end ()) {
-
-					delete writeCallbacks[handle];
-					delete writeBytes[handle];
-					delete writeBytesRoot[handle];
-
-				}
-
-				ValuePointer* callback = new ValuePointer (parameter);
-				writeCallbacks[handle] = callback;
-				Bytes* _writeBytes = new Bytes (bytes);
-				writeBytes[handle] = _writeBytes;
-				writeBytesRoot[handle] = new ValuePointer (bytes);
-
-				code = curl_easy_setopt (easy_handle, type, write_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_WRITEDATA, handle);
+				code = curl_easy_setopt (data->curl, type, write_callback);
+				curl_easy_setopt (data->curl, CURLOPT_WRITEDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -1678,19 +1070,8 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (headerCallbacks.find (handle) == headerCallbacks.end ()) {
-
-					delete headerCallbacks[handle];
-					delete headerValues[handle];
-
-				}
-
-				ValuePointer* callback = new ValuePointer (parameter);
-				headerCallbacks[handle] = callback;
-				headerValues[handle] = new std::vector<char*> ();
-
-				code = curl_easy_setopt (easy_handle, type, header_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_HEADERDATA, handle);
+				code = curl_easy_setopt (data->curl, type, header_callback);
+				curl_easy_setopt (data->curl, CURLOPT_HEADERDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -1699,19 +1080,9 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-					delete progressCallbacks[handle];
-					delete progressValues[handle];
-
-				}
-
-				progressCallbacks[handle] = new ValuePointer (parameter);;
-				progressValues[handle] = new CURL_Progress ();
-
-				code = curl_easy_setopt (easy_handle, type, progress_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_PROGRESSDATA, handle);
-				curl_easy_setopt (easy_handle, CURLOPT_NOPROGRESS, false);
+				code = curl_easy_setopt (data->curl, type, progress_callback);
+				curl_easy_setopt (data->curl, CURLOPT_PROGRESSDATA, data);
+				curl_easy_setopt (data->curl, CURLOPT_NOPROGRESS, false);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -1720,19 +1091,9 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (xferInfoCallbacks.find (handle) != xferInfoCallbacks.end ()) {
-
-					delete xferInfoCallbacks[handle];
-					delete xferInfoValues[handle];
-
-				}
-
-				xferInfoCallbacks[handle] = new ValuePointer (parameter);
-				xferInfoValues[handle] = new CURL_XferInfo ();
-
-				code = curl_easy_setopt (easy_handle, type, xferinfo_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_XFERINFODATA, handle);
-				curl_easy_setopt (easy_handle, CURLOPT_NOPROGRESS, false);
+				code = curl_easy_setopt (data->curl, type, xferinfo_callback);
+				curl_easy_setopt (data->curl, CURLOPT_XFERINFODATA, data);
+				curl_easy_setopt (data->curl, CURLOPT_NOPROGRESS, false);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -1742,10 +1103,9 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (headerSLists.find (handle) != headerSLists.end ()) {
-
-					curl_slist_free_all (headerSLists[handle]);
-
+				if(data->slist) {
+					curl_slist_free_all(data->slist);
+					data->slist = nullptr;
 				}
 
 				struct curl_slist *chunk = NULL;
@@ -1757,9 +1117,9 @@ namespace lime {
 
 				}
 
-				headerSLists[handle] = chunk;
+				data->slist = chunk;
 
-				code = curl_easy_setopt (easy_handle, type, chunk);
+				code = curl_easy_setopt (data->curl, type, chunk);
 				curl_gc_mutex.Unlock ();
 				break;
 			}
@@ -1778,7 +1138,8 @@ namespace lime {
 	HL_PRIM int HL_NAME(hl_curl_easy_setopt) (HL_CFFIPointer* handle, int option, vdynamic* parameter, Bytes* bytes) {
 
 		CURLcode code = CURLE_OK;
-		CURL* easy_handle = (CURL*)handle->ptr;
+		CURLData *data = CURLData::fromCFFI(handle);
+		CURL* easy_handle = data->curl;
 		CURLoption type = (CURLoption)option;
 
 		switch (type) {
@@ -2061,20 +1422,10 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (readBytes.find (handle) == readBytes.end ()) {
-
-					delete readBytesRoot[handle];
-
-				}
-
-				readBytes[handle] = bytes;
-				readBytesPosition[handle] = 0;
-				readBytesRoot[handle] = new ValuePointer ((vobj*)bytes);
-
 				curl_easy_setopt (easy_handle, CURLOPT_SEEKFUNCTION, seek_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_SEEKDATA, handle);
+				curl_easy_setopt (easy_handle, CURLOPT_SEEKDATA, data);
 				code = curl_easy_setopt (easy_handle, CURLOPT_READFUNCTION, read_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_READDATA, handle);
+				curl_easy_setopt (easy_handle, CURLOPT_READDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -2083,20 +1434,8 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (writeCallbacks.find (handle) == writeCallbacks.end ()) {
-
-					delete writeCallbacks[handle];
-					delete writeBytesRoot[handle];
-
-				}
-
-				ValuePointer* callback = new ValuePointer (parameter);
-				writeCallbacks[handle] = callback;
-				writeBytes[handle] = bytes;
-				writeBytesRoot[handle] = new ValuePointer ((vobj*)bytes);
-
 				code = curl_easy_setopt (easy_handle, type, write_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_WRITEDATA, handle);
+				curl_easy_setopt (easy_handle, CURLOPT_WRITEDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -2105,19 +1444,8 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (headerCallbacks.find (handle) == headerCallbacks.end ()) {
-
-					delete headerCallbacks[handle];
-					delete headerValues[handle];
-
-				}
-
-				ValuePointer* callback = new ValuePointer (parameter);
-				headerCallbacks[handle] = callback;
-				headerValues[handle] = new std::vector<char*> ();
-
 				code = curl_easy_setopt (easy_handle, type, header_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_HEADERDATA, handle);
+				curl_easy_setopt (easy_handle, CURLOPT_HEADERDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -2126,18 +1454,8 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (progressCallbacks.find (handle) != progressCallbacks.end ()) {
-
-					delete progressCallbacks[handle];
-					delete progressValues[handle];
-
-				}
-
-				progressCallbacks[handle] = new ValuePointer (parameter);
-				progressValues[handle] = new CURL_Progress ();
-
 				code = curl_easy_setopt (easy_handle, type, progress_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_PROGRESSDATA, handle);
+				curl_easy_setopt (easy_handle, CURLOPT_PROGRESSDATA, data);
 				curl_easy_setopt (easy_handle, CURLOPT_NOPROGRESS, false);
 
 				curl_gc_mutex.Unlock ();
@@ -2147,18 +1465,8 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (xferInfoCallbacks.find (handle) != xferInfoCallbacks.end ()) {
-
-					delete xferInfoCallbacks[handle];
-					delete xferInfoValues[handle];
-
-				}
-
-				xferInfoCallbacks[handle] = new ValuePointer (parameter);
-				xferInfoValues[handle] = new CURL_XferInfo ();
-
 				code = curl_easy_setopt (easy_handle, type, xferinfo_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_XFERINFODATA, handle);
+				curl_easy_setopt (easy_handle, CURLOPT_XFERINFODATA, data);
 				curl_easy_setopt (easy_handle, CURLOPT_NOPROGRESS, false);
 
 				curl_gc_mutex.Unlock ();
@@ -2169,26 +1477,26 @@ namespace lime {
 			{
 				curl_gc_mutex.Lock ();
 
-				if (headerSLists.find (handle) != headerSLists.end ()) {
+				if (data->slist) {
 
-					curl_slist_free_all (headerSLists[handle]);
-
+					curl_slist_free_all (data->slist);
+					data->slist = nullptr;
 				}
 
 				struct curl_slist *chunk = NULL;
 				varray* stringList = (varray*)parameter;
 				hl_vstring** stringListData = hl_aptr (stringList, hl_vstring*);
 				int size = stringList->size;
-				hl_vstring* data;
+				hl_vstring* sdata;
 
 				for (int i = 0; i < size; i++) {
 
-					data = *stringListData++;
-					chunk = curl_slist_append (chunk, data ? hl_to_utf8 (data->bytes) : NULL);
+					sdata = *stringListData++;
+					chunk = curl_slist_append (chunk, sdata ? hl_to_utf8 (sdata->bytes) : NULL);
 
 				}
 
-				headerSLists[handle] = chunk;
+				data->slist = chunk;
 
 				code = curl_easy_setopt (easy_handle, type, chunk);
 				curl_gc_mutex.Unlock ();
@@ -2298,7 +1606,7 @@ namespace lime {
 		// curl_gc_mutex.Lock ();
 
 		// CURLMcode result = curl_multi_cleanup ((CURLM*)val_data (multi_handle));
-		gc_curl_multi (multi_handle);
+		delete CURLMultiData::fromCFFI(multi_handle);
 
 		// curl_gc_mutex.Unlock ();
 
@@ -2312,7 +1620,7 @@ namespace lime {
 		// curl_gc_mutex.Lock ();
 
 		// CURLMcode result = curl_multi_cleanup ((CURLM*)val_data (multi_handle));
-		hl_gc_curl_multi (multi_handle);
+		delete CURLMultiData::fromCFFI(multi_handle);
 
 		// curl_gc_mutex.Unlock ();
 
@@ -2322,111 +1630,48 @@ namespace lime {
 
 
 	value lime_curl_multi_init () {
-
-		curl_gc_mutex.Lock ();
-
-		value handle = CFFIPointer (curl_multi_init (), gc_curl_multi);
-
-		if (curlMultiValid.find (handle) != curlMultiValid.end ()) {
-
-			printf ("Error: Duplicate cURL Multi handle\n");
-
-		}
-
-		curlMultiValid[handle] = true;
-		curlMultiRunningHandles[handle] = 0;
-		curlMultiHandles[handle] = new std::vector<void*> ();
-
-		curl_gc_mutex.Unlock ();
-
-		return handle;
-
+		return (new CURLMultiData())->allocCFFI();
 	}
 
 
 	HL_PRIM HL_CFFIPointer* HL_NAME(hl_curl_multi_init) () {
-
-		curl_gc_mutex.Lock ();
-
-		HL_CFFIPointer* handle = HLCFFIPointer (curl_multi_init (), (hl_finalizer)hl_gc_curl_multi);
-
-		if (curlMultiValid.find (handle) != curlMultiValid.end ()) {
-
-			printf ("Error: Duplicate cURL Multi handle\n");
-
-		}
-
-		curlMultiValid[handle] = true;
-		curlMultiRunningHandles[handle] = 0;
-		curlMultiHandles[handle] = new std::vector<void*> ();
-
-		curl_gc_mutex.Unlock ();
-
-		return handle;
-
+		return (new CURLMultiData())->allocCFFI_HL();
 	}
 
 
 	int lime_curl_multi_add_handle (value multi_handle, value curl_object, value curl_handle) {
 
-		curl_gc_mutex.Lock ();
-
-		CURLMcode result = curl_multi_add_handle ((CURLM*)val_data (multi_handle), (CURL*)val_data (curl_handle));
-
-		if (result == CURLM_OK) {
-
-			curlMultiReferences[curl_handle] = multi_handle;
-			curlMultiHandles[multi_handle]->push_back (curl_handle);
-			curlMultiObjects[curl_handle] = new ValuePointer (curl_object);
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
-		return result;
+		return CURLMultiData::fromCFFI(multi_handle)->AddHandle(CURLData::fromCFFI(curl_handle));
 
 	}
 
 
 	HL_PRIM int HL_NAME(hl_curl_multi_add_handle) (HL_CFFIPointer* multi_handle, vdynamic* curl_object, HL_CFFIPointer* curl_handle) {
 
-		curl_gc_mutex.Lock ();
-
-		CURLMcode result = curl_multi_add_handle ((CURLM*)multi_handle->ptr, (CURL*)curl_handle->ptr);
-
-		if (result == CURLM_OK) {
-
-			curlMultiReferences[curl_handle] = multi_handle;
-			curlMultiHandles[multi_handle]->push_back (curl_handle);
-			curlMultiObjects[curl_handle] = new ValuePointer (curl_object);
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
-		return result;
+		return CURLMultiData::fromCFFI(multi_handle)->AddHandle(CURLData::fromCFFI(curl_handle));
 
 	}
 
 
 	int lime_curl_multi_get_running_handles (value multi_handle) {
 
-		return curlMultiRunningHandles[multi_handle];
+		return CURLMultiData::fromCFFI(multi_handle)->runningHandles;
 
 	}
 
 
 	HL_PRIM int HL_NAME(hl_curl_multi_get_running_handles) (HL_CFFIPointer* multi_handle) {
 
-		return curlMultiRunningHandles[multi_handle];
+		return CURLMultiData::fromCFFI(multi_handle)->runningHandles;
 
 	}
 
 
 	value lime_curl_multi_info_read (value multi_handle) {
 
+		CURLMultiData *mdata = CURLMultiData::fromCFFI(multi_handle);
 		int msgs_in_queue;
-		CURLMsg* msg = curl_multi_info_read ((CURLM*)val_data (multi_handle), &msgs_in_queue);
+		CURLMsg* msg = curl_multi_info_read (mdata->curlm, &msgs_in_queue);
 
 		if (msg) {
 
@@ -2437,10 +1682,10 @@ namespace lime {
 			CURL* curl = msg->easy_handle;
 			value result = alloc_empty_object ();
 
-			if (curlObjects.find (curl) != curlObjects.end ()) {
+			if (mdata->handles.find (curl) != mdata->handles.end ()) {
 
-				value handle = (value)curlObjects[curl];
-				alloc_field (result, id_curl, (value)curlMultiObjects[handle]->Get ());
+				value obj = (value)mdata->handles[curl]->haxe_object->Get();
+				alloc_field (result, id_curl, obj);
 
 			} else {
 
@@ -2462,9 +1707,9 @@ namespace lime {
 
 
 	HL_PRIM vdynamic* HL_NAME(hl_curl_multi_info_read) (HL_CFFIPointer* multi_handle, vdynamic* result) {
-
+		CURLMultiData *mdata = CURLMultiData::fromCFFI(multi_handle);
 		int msgs_in_queue;
-		CURLMsg* msg = curl_multi_info_read ((CURLM*)multi_handle->ptr, &msgs_in_queue);
+		CURLMsg* msg = curl_multi_info_read (mdata->curlm, &msgs_in_queue);
 
 		if (msg) {
 
@@ -2474,10 +1719,10 @@ namespace lime {
 
 			CURL* curl = msg->easy_handle;
 
-			if (curlObjects.find (curl) != curlObjects.end ()) {
+			if (mdata->handles.find (curl) != mdata->handles.end ()) {
 
-				HL_CFFIPointer* handle = (HL_CFFIPointer*)curlObjects[curl];
-				hl_dyn_setp (result, id_curl, &hlt_dyn, (vdynamic*)curlMultiObjects[handle]->Get ());
+				vdynamic* obj = (vdynamic*)mdata->handles[curl]->haxe_object->Get();
+				hl_dyn_setp (result, id_curl, &hlt_dyn, obj);
 
 			} else {
 
@@ -2499,137 +1744,40 @@ namespace lime {
 
 
 	int lime_curl_multi_perform (value multi_handle) {
-
-		curl_gc_mutex.Lock ();
-
-		int runningHandles = 0;
-		CURLMcode result = curl_multi_perform ((CURLM*)val_data (multi_handle), &runningHandles);
-
-		std::vector<void*>* handles = curlMultiHandles[multi_handle];
-
-		for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-			curl_gc_mutex.Unlock ();
-			lime_curl_easy_flush ((value)*it);
-			curl_gc_mutex.Lock ();
-
-		}
-
-		curlMultiRunningHandles[multi_handle] = runningHandles;
-
-		curl_gc_mutex.Unlock ();
-
-		return result;
-
+		System::GCEnterBlocking();
+		auto code = CURLMultiData::fromCFFI(multi_handle)->Perform();
+		System::GCExitBlocking();
+		return code;
 	}
 
 
 	HL_PRIM int HL_NAME(hl_curl_multi_perform) (HL_CFFIPointer* multi_handle) {
-
-		curl_gc_mutex.Lock ();
-
-		int runningHandles = 0;
-		CURLMcode result = curl_multi_perform ((CURLM*)multi_handle->ptr, &runningHandles);
-
-		std::vector<void*>* handles = curlMultiHandles[multi_handle];
-
-		for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-			curl_gc_mutex.Unlock ();
-			lime_hl_curl_easy_flush ((HL_CFFIPointer*)*it);
-			curl_gc_mutex.Lock ();
-
-		}
-
-		curlMultiRunningHandles[multi_handle] = runningHandles;
-
-		curl_gc_mutex.Unlock ();
-
-		return result;
-
+		hl_blocking(true);
+		auto code = CURLMultiData::fromCFFI(multi_handle)->Perform();
+		hl_blocking(false);
+		return code;
 	}
 
 
 	int lime_curl_multi_remove_handle (value multi_handle, value curl_handle) {
 
-		curl_gc_mutex.Lock ();
-
-		CURLMcode result = curl_multi_remove_handle ((CURLM*)val_data (multi_handle), (CURL*)val_data (curl_handle));
-
-		if (/*result == CURLM_OK &&*/ curlMultiReferences.find (curl_handle) != curlMultiReferences.end ()) {
-
-			curlMultiReferences.erase (curl_handle);
-
-		}
-
-		std::vector<void*>* handles = curlMultiHandles[multi_handle];
-
-		if (handles->size () > 0) {
-
-			for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-				if (*it == curl_handle) {
-
-					handles->erase (it);
-					delete curlMultiObjects[curl_handle];
-					curlMultiObjects.erase (curl_handle);
-					break;
-
-				}
-
-			}
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
-		return result;
-
-	}
+                return CURLMultiData::fromCFFI(multi_handle)
+                    ->RemoveHandle(CURLData::fromCFFI(curl_handle));
+        }
 
 
 	HL_PRIM int HL_NAME(hl_curl_multi_remove_handle) (HL_CFFIPointer* multi_handle, HL_CFFIPointer* curl_handle) {
 
-		curl_gc_mutex.Lock ();
-
-		CURLMcode result = curl_multi_remove_handle ((CURLM*)multi_handle->ptr, (CURL*)curl_handle->ptr);
-
-		if (/*result == CURLM_OK &&*/ curlMultiReferences.find (curl_handle) != curlMultiReferences.end ()) {
-
-			curlMultiReferences.erase (curl_handle);
-
-		}
-
-		std::vector<void*>* handles = curlMultiHandles[multi_handle];
-
-		if (handles->size () > 0) {
-
-			for (std::vector<void*>::iterator it = handles->begin (); it != handles->end (); ++it) {
-
-				if (*it == curl_handle) {
-
-					handles->erase (it);
-					delete curlMultiObjects[curl_handle];
-					curlMultiObjects.erase (curl_handle);
-					break;
-
-				}
-
-			}
-
-		}
-
-		curl_gc_mutex.Unlock ();
-
-		return result;
-
-	}
+                return CURLMultiData::fromCFFI(multi_handle)
+                    ->RemoveHandle(CURLData::fromCFFI(curl_handle));
+        }
 
 
 	int lime_curl_multi_setopt (value multi_handle, int option, value parameter) {
 
+		CURLMultiData *data = CURLMultiData::fromCFFI(multi_handle);
 		CURLMcode code = CURLM_OK;
-		CURLM* multi = (CURLM*)val_data (multi_handle);
+		CURLM* multi = data->curlm;
 		CURLMoption type = (CURLMoption)option;
 
 		switch (type) {
@@ -2678,8 +1826,9 @@ namespace lime {
 
 	HL_PRIM int HL_NAME(hl_curl_multi_setopt) (HL_CFFIPointer* multi_handle, int option, vdynamic* parameter) {
 
+		CURLMultiData *data = CURLMultiData::fromCFFI(multi_handle);
 		CURLMcode code = CURLM_OK;
-		CURLM* multi = (CURLM*)multi_handle->ptr;
+		CURLM* multi = data->curlm;
 		CURLMoption type = (CURLMoption)option;
 
 		switch (type) {
@@ -2731,7 +1880,7 @@ namespace lime {
 		System::GCEnterBlocking ();
 
 		int retcode;
-		CURLMcode result = curl_multi_wait ((CURLM*)val_data (multi_handle), 0, 0, timeout_ms, &retcode);
+		CURLMcode result = curl_multi_wait (CURLMultiData::fromCFFI(multi_handle)->curlm, 0, 0, timeout_ms, &retcode);
 
 		System::GCExitBlocking ();
 		return result;
@@ -2744,7 +1893,7 @@ namespace lime {
 		System::GCEnterBlocking ();
 
 		int retcode;
-		CURLMcode result = curl_multi_wait ((CURLM*)multi_handle->ptr, 0, 0, timeout_ms, &retcode);
+		CURLMcode result = curl_multi_wait (CURLMultiData::fromCFFI(multi_handle)->curlm, 0, 0, timeout_ms, &retcode);
 
 		System::GCExitBlocking ();
 		return result;
@@ -2817,10 +1966,10 @@ namespace lime {
 
 
 	DEFINE_PRIME1v (lime_curl_easy_cleanup);
-	DEFINE_PRIME1 (lime_curl_easy_duphandle);
+	DEFINE_PRIME2v (lime_curl_easy_duphandle);
 	DEFINE_PRIME3 (lime_curl_easy_escape);
 	DEFINE_PRIME2 (lime_curl_easy_getinfo);
-	DEFINE_PRIME0 (lime_curl_easy_init);
+	DEFINE_PRIME1v (lime_curl_easy_init);
 	DEFINE_PRIME1v (lime_curl_easy_flush);
 	DEFINE_PRIME2 (lime_curl_easy_pause);
 	DEFINE_PRIME1 (lime_curl_easy_perform);
@@ -2850,10 +1999,10 @@ namespace lime {
 	#define _TCFFIPOINTER _DYN
 
 	DEFINE_HL_PRIM (_VOID, hl_curl_easy_cleanup, _TCFFIPOINTER);
-	DEFINE_HL_PRIM (_TCFFIPOINTER, hl_curl_easy_duphandle, _TCFFIPOINTER);
+	DEFINE_HL_PRIM (_TCFFIPOINTER, hl_curl_easy_duphandle, _TCFFIPOINTER _DYN);
 	DEFINE_HL_PRIM (_BYTES, hl_curl_easy_escape, _TCFFIPOINTER _STRING _I32);
 	DEFINE_HL_PRIM (_DYN, hl_curl_easy_getinfo, _TCFFIPOINTER _I32);
-	DEFINE_HL_PRIM (_TCFFIPOINTER, hl_curl_easy_init, _NO_ARG);
+	DEFINE_HL_PRIM (_TCFFIPOINTER, hl_curl_easy_init, _DYN);
 	DEFINE_HL_PRIM (_VOID, hl_curl_easy_flush, _TCFFIPOINTER);
 	DEFINE_HL_PRIM (_I32, hl_curl_easy_pause, _TCFFIPOINTER _I32);
 	DEFINE_HL_PRIM (_I32, hl_curl_easy_perform, _TCFFIPOINTER);

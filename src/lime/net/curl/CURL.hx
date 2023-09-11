@@ -32,7 +32,7 @@ class CURL
 		else
 		{
 			#if (lime_cffi && lime_curl && !macro)
-			this.handle = NativeCFFI.lime_curl_easy_init();
+			this.handle = NativeCFFI.lime_curl_easy_init(this);
 			#end
 		}
 	}
@@ -47,7 +47,9 @@ class CURL
 	public function clone():CURL
 	{
 		#if (lime_cffi && lime_curl && !macro)
-		return new CURL(NativeCFFI.lime_curl_easy_duphandle(handle));
+		var c = new CURL(this.handle);
+		c.handle = NativeCFFI.lime_curl_easy_duphandle(this.handle, c);
+		return c;
 		#else
 		return null;
 		#end
@@ -143,6 +145,12 @@ class CURL
 		#end
 
 	}*/
+
+	var progressCallback:CURL->Float->Float->Float->Float->Void = null;
+	var xferInfoCallback:CURL->Int->Int->Int->Int->Int = null;
+	var writeFunction:CURL->Bytes->Int = null;
+	var headerFunction:CURL->String->Void = null;
+
 	public function setOption(option:CURLOption, parameter:Dynamic):CURLCode
 	{
 		#if (lime_cffi && lime_curl && !macro)
@@ -166,15 +174,24 @@ class CURL
 
 			case CURLOption.WRITEFUNCTION:
 				var callback:CURL->Bytes->Int = cast parameter;
-				parameter = function(bytes:Bytes, length:Int):Int
-				{
-					var cacheLength = bytes.length;
-					@:privateAccess bytes.length = length;
-					var read = callback(this, bytes);
-					@:privateAccess bytes.length = cacheLength;
-					return read;
+				#if hl
+				parameter = function(bytes:hl.Bytes, length:Int) {
+					return callback(this, bytes.toBytes(length));
 				}
-				bytes = Bytes.alloc(0);
+				#else // cpp and neko
+				parameter = function(bytes:haxe.io.BytesData, length:Int) {
+					return callback(this, haxe.io.Bytes.ofData(bytes));
+				}
+				#end
+				// parameter = function(bytes:Bytes, length:Int):Int
+				// {
+				// 	var cacheLength = bytes.length;
+				// 	@:privateAccess bytes.length = length;
+				// 	var read = callback(this, bytes);
+				// 	@:privateAccess bytes.length = cacheLength;
+				// 	return read;
+				// }
+				// bytes = Bytes.alloc(0);
 
 			// case CURLOption.READFUNCTION:
 
@@ -182,8 +199,8 @@ class CURL
 			// TODO: Unsafe version?
 			// return cast 0;
 
-			case CURLOption.READDATA:
-				bytes = parameter;
+			// case CURLOption.READDATA:
+			// 	bytes = parameter;
 
 			case CURLOption.HEADERFUNCTION:
 				var callback:CURL->String->Void = cast parameter;

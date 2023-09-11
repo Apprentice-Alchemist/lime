@@ -121,7 +121,7 @@ namespace lime {
 				(vdynamic*)arg1,
 			};
 
-			return hl_dyn_call ((vclosure*)hlValue, (vdynamic**)&args, 2);
+			return hl_dyn_call ((vclosure*)hlValue, args, 2);
 
 		}
 
@@ -142,7 +142,7 @@ namespace lime {
 				(vdynamic*)arg2,
 			};
 
-			return hl_dyn_call ((vclosure*)hlValue, (vdynamic**)&args, 3);
+			return hl_dyn_call ((vclosure*)hlValue, args, 3);
 
 		}
 
@@ -171,7 +171,7 @@ namespace lime {
 				(vdynamic*)arg3,
 			};
 
-			return hl_dyn_call ((vclosure*)hlValue, (vdynamic**)&args, 4);
+			return hl_dyn_call ((vclosure*)hlValue, args, 4);
 
 		}
 
@@ -202,7 +202,7 @@ namespace lime {
 				(vdynamic*)arg4,
 			};
 
-			return hl_dyn_call ((vclosure*)hlValue, (vdynamic**)&args, 5);
+			return hl_dyn_call ((vclosure*)hlValue, args, 5);
 
 		}
 
@@ -264,6 +264,14 @@ namespace lime {
 
 		hlValue = handle;
 
+	}
+
+	ValuePointer* ValuePointer::Clone() {
+		if(IsHLValue()) {
+			return new ValuePointer((vdynamic*)Get());
+		} else {
+			return new ValuePointer((value)Get());
+		}
 	}
 
 

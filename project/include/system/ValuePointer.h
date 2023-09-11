@@ -30,6 +30,7 @@ namespace lime {
 			bool IsHLValue ();
 			void Set (vobj* handle);
 			void Set (value handle);
+			ValuePointer *Clone();
 
 		private:
 

@@ -16,6 +16,7 @@ class CURLMulti
 	public var runningHandles(get, never):Int;
 
 	@:noCompletion private var handle:CFFIPointer;
+	private var curlHandles:Map<CURL, Bool> = [];
 	#if hl
 	@:noCompletion private var infoObject:CURLMultiMessage;
 	#end
@@ -40,6 +41,7 @@ class CURLMulti
 
 	public function addHandle(curl:CURL):CURLMultiCode
 	{
+		curlHandles.set(curl, true);
 		#if (lime_cffi && lime_curl && !macro)
 		return cast NativeCFFI.lime_curl_multi_add_handle(handle, curl, curl.handle);
 		#else
@@ -72,6 +74,7 @@ class CURLMulti
 
 	public function removeHandle(curl:CURL):CURLMultiCode
 	{
+		curlHandles.remove(curl);
 		#if (lime_cffi && lime_curl && !macro)
 		return cast NativeCFFI.lime_curl_multi_remove_handle(handle, curl.handle);
 		#else
