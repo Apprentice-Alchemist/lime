@@ -985,7 +985,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_buffer();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.BUFFER);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.BUFFER, object);
 		return object;
 		#else
@@ -998,7 +998,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_framebuffer();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.FRAMEBUFFER);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.FRAMEBUFFER, object);
 		return object;
 		#else
@@ -1011,7 +1011,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_program();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.PROGRAM);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.PROGRAM, object);
 		return object;
 		#else
@@ -1024,7 +1024,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_query();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.QUERY);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.QUERY, object);
 		return object;
 		#else
@@ -1037,7 +1037,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_renderbuffer();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.RENDERBUFFER);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.RENDERBUFFER, object);
 		return object;
 		#else
@@ -1050,7 +1050,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_sampler();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.SAMPLER);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.SAMPLER, object);
 		return object;
 		#else
@@ -1063,7 +1063,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_shader(type);
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.SHADER);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.SHADER, object);
 		return object;
 		#else
@@ -1076,7 +1076,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_texture();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.TEXTURE);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.TEXTURE, object);
 		return object;
 		#else
@@ -1089,7 +1089,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_transform_feedback();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.TRANSFORM_FEEDBACK);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.TRANSFORM_FEEDBACK, object);
 		return object;
 		#else
@@ -1102,7 +1102,7 @@ class NativeOpenGLRenderContext
 		#if (lime_cffi && (lime_opengl || lime_opengles) && !macro)
 		var id = NativeCFFI.lime_gl_create_vertex_array();
 		if (id == 0) return null;
-		var object = new GLObject(id);
+		var object = new GLObject(id, GLObjectType.VERTEX_ARRAY_OBJECT);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, GLObjectType.VERTEX_ARRAY_OBJECT, object);
 		return object;
 		#else
@@ -3287,11 +3287,6 @@ class NativeOpenGLRenderContext
 	}
 
 	#if (!js || !html5 || doc_gen)
-	private function __createObject(id:Int):GLObject
-	{
-		return new GLObject(id);
-	}
-
 	private function __getObjectID(object:GLObject):Int
 	{
 		return (object == null) ? 0 : object.id;

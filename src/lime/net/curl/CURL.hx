@@ -158,6 +158,8 @@ class CURL
 
 		switch (option)
 		{
+			case SEEKFUNCTION:
+
 			case CURLOption.PROGRESSFUNCTION:
 				var callback:CURL->Float->Float->Float->Float->Void = cast parameter;
 				parameter = function(dltotal:Float, dlnow:Float, ultotal:Float, ulnow:Float)

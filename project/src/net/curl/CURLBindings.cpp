@@ -24,6 +24,7 @@ namespace lime {
         public:
           std::atomic_int ref_count;
           CURL *curl;
+          ValuePointer *readCallback = nullptr;
           ValuePointer *headerCallback = nullptr;
           ValuePointer *seekCallback = nullptr;
           ValuePointer *progressCallback = nullptr;
@@ -127,6 +128,7 @@ namespace lime {
             HL_CFFIPointer *ptr =
                 (HL_CFFIPointer *)hl_gc_alloc_finalizer(sizeof(HL_CFFIPointer));
             ptr->finalizer = (void *)gc_hl;
+			ptr->ptr = this;
             return ptr;
           }
         };
@@ -137,6 +139,8 @@ namespace lime {
           curl = curl_easy_duphandle(in->curl);
           headerCallback =
               in->headerCallback ? in->headerCallback->Clone() : nullptr;
+          readCallback =
+              in->readCallback ? in->readCallback->Clone() : nullptr;
           seekCallback =
               in->seekCallback ? in->seekCallback->Clone() : nullptr;
           progressCallback =
@@ -198,10 +202,11 @@ namespace lime {
         }
 
         HL_CFFIPointer *CURLData::allocCFFI_HL() {
-          ref_count++;
+          this->ref_count++;
           HL_CFFIPointer *ptr =
               (HL_CFFIPointer *)hl_gc_alloc_finalizer(sizeof(HL_CFFIPointer));
           ptr->finalizer = (void *)gc_hl;
+		  ptr->ptr = this;
           return ptr;
         }
 
@@ -260,8 +265,9 @@ namespace lime {
 
 	value lime_curl_easy_getinfo (value curl, int info) {
 
+		CURLData *data = CURLData::fromCFFI(curl);
 		CURLcode code = CURLE_OK;
-		CURL* handle = (CURL*)val_data(curl);
+		CURL* handle = data->curl;
 		CURLINFO type = (CURLINFO)info;
 
 		switch (type) {
@@ -375,8 +381,9 @@ namespace lime {
 
 	HL_PRIM vdynamic* HL_NAME(hl_curl_easy_getinfo) (HL_CFFIPointer* curl, int info) {
 
+		CURLData *data = CURLData::fromCFFI(curl);
 		CURLcode code = CURLE_OK;
-		CURL* handle = (CURL*)curl->ptr;
+		CURL* handle = data->curl;
 		CURLINFO type = (CURLINFO)info;
 
 		int size;
@@ -519,12 +526,7 @@ namespace lime {
 	int lime_curl_easy_perform (value easy_handle) {
 
 		int code;
-		System::GCEnterBlocking ();
-
 		code = curl_easy_perform (CURLData::fromCFFI(easy_handle)->curl);
-
-		System::GCExitBlocking ();
-
 		return code;
 
 	}
@@ -533,12 +535,7 @@ namespace lime {
 	HL_PRIM int HL_NAME(hl_curl_easy_perform) (HL_CFFIPointer* easy_handle) {
 
 		int code;
-		hl_blocking(true);
-
 		code = curl_easy_perform (CURLData::fromCFFI(easy_handle)->curl);
-
-		hl_blocking(false);
-
 		return code;
 
 	}
@@ -606,6 +603,13 @@ namespace lime {
 		return v;
 	}
 
+	static int hl_dyn_to_i(vdynamic *d) {
+		if(d) {
+			return d->v.i;
+		} else {
+			return 0;
+		}
+	}
 
 
 	static size_t header_callback (void *ptr, size_t size, size_t nmemb, void *userp) {
@@ -644,12 +648,12 @@ namespace lime {
 				db,
 				hl_alloc_int(len),
 			};
-			return hl_dyn_call(cb, args, 2)->v.i;
+			return hl_dyn_to_i(hl_dyn_call(cb, args, 2));
 		} else {
 			size_t len = size * nmemb;
 			buffer buf = alloc_buffer_len(len);
 			buffer_append_sub(buf, (const char*)ptr, len);
-			value val = buffer_to_string(buf);
+			value val = buffer_val(buf);
 			value cb = (value)data->writeCallback->Get();
 			value args[] = {
 				val,
@@ -676,7 +680,7 @@ namespace lime {
 				hl_alloc_int(offset),
 				hl_alloc_int(origin),
 			};
-			return hl_dyn_call(cb, args, 2)->v.i;
+			return hl_dyn_to_i(hl_dyn_call(cb, args, 2));
 		} else {
 			value cb  = (value)data->seekCallback->Get();
 			value args[] = {
@@ -696,7 +700,7 @@ namespace lime {
 
 		CURLData *data = (CURLData*)userp;
 
-		if(!data) {
+		if(!data && !data->progressCallback) {
 			return 0;
 		}
 
@@ -712,7 +716,7 @@ namespace lime {
 				hl_alloc_double(ultotal),
 				hl_alloc_double(ulnow),
 			};
-			return hl_dyn_call(cb, args, 4)->v.i;
+			return hl_dyn_to_i(hl_dyn_call(cb, args, 4));
 		} else {
 			value cb  = (value)data->progressCallback->Get();
 			value args[] = {
@@ -731,7 +735,7 @@ namespace lime {
 
 		CURLData *data = (CURLData*)userp;
 
-		if(!data) {
+		if(!data && !data->xferInfoCallback) {
 			return 0;
 		}
 
@@ -747,7 +751,7 @@ namespace lime {
 				hl_alloc_int(ultotal),
 				hl_alloc_int(ulnow),
 			};
-			return hl_dyn_call(cb, args, 4)->v.i;
+			return hl_dyn_to_i(hl_dyn_call(cb, args, 2));
         } else {
 			value cb  = (value)data->xferInfoCallback->Get();
 			value args[] = {
@@ -984,8 +988,6 @@ namespace lime {
 
 			case CURLOPT_IOCTLFUNCTION:
 			case CURLOPT_IOCTLDATA:
-			case CURLOPT_SEEKFUNCTION:
-			case CURLOPT_SEEKDATA:
 			case CURLOPT_SOCKOPTFUNCTION:
 			case CURLOPT_SOCKOPTDATA:
 			case CURLOPT_OPENSOCKETFUNCTION:
@@ -1035,23 +1037,27 @@ namespace lime {
 
 			case CURLOPT_READFUNCTION:
 			{
-				// curl_gc_mutex.Lock ();
-				// ValuePointer* callback = new ValuePointer (parameter);
-				// readCallbacks[handle] = callback;
-				// code = curl_easy_setopt (easy_handle, type, read_callback);
-				// curl_easy_setopt (easy_handle, CURLOPT_READDATA, handle);
-				// curl_gc_mutex.Unlock ();
+				curl_gc_mutex.Lock ();
+				if(data->readCallback) {
+					delete data->readCallback;
+				}
+				data->readCallback = new ValuePointer(parameter);
+				code = curl_easy_setopt (data->curl, type, read_callback);
+				curl_easy_setopt (data->curl, CURLOPT_READDATA, data);
+				curl_gc_mutex.Unlock ();
 				break;
 			}
-			case CURLOPT_READDATA:
+			case CURLOPT_SEEKFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
 
+				if(data->seekCallback) {
+					delete data->seekCallback;
+				}
+				data->seekCallback = new ValuePointer(parameter);
 				// seek function is needed to support redirects
 				curl_easy_setopt (data->curl, CURLOPT_SEEKFUNCTION, seek_callback);
 				curl_easy_setopt (data->curl, CURLOPT_SEEKDATA, data);
-				code = curl_easy_setopt (data->curl, CURLOPT_READFUNCTION, read_callback);
-				curl_easy_setopt (data->curl, CURLOPT_READDATA, data);
 
 				curl_gc_mutex.Unlock ();
 				break;
@@ -1059,7 +1065,10 @@ namespace lime {
 			case CURLOPT_WRITEFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->writeCallback) {
+					delete data->seekCallback;
+				}
+				data->writeCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (data->curl, type, write_callback);
 				curl_easy_setopt (data->curl, CURLOPT_WRITEDATA, data);
 
@@ -1069,7 +1078,10 @@ namespace lime {
 			case CURLOPT_HEADERFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->headerCallback) {
+					delete data->seekCallback;
+				}
+				data->headerCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (data->curl, type, header_callback);
 				curl_easy_setopt (data->curl, CURLOPT_HEADERDATA, data);
 
@@ -1079,7 +1091,10 @@ namespace lime {
 			case CURLOPT_PROGRESSFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->progressCallback) {
+					delete data->seekCallback;
+				}
+				data->progressCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (data->curl, type, progress_callback);
 				curl_easy_setopt (data->curl, CURLOPT_PROGRESSDATA, data);
 				curl_easy_setopt (data->curl, CURLOPT_NOPROGRESS, false);
@@ -1090,7 +1105,10 @@ namespace lime {
 			case CURLOPT_XFERINFOFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->xferInfoCallback) {
+					delete data->seekCallback;
+				}
+				data->xferInfoCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (data->curl, type, xferinfo_callback);
 				curl_easy_setopt (data->curl, CURLOPT_XFERINFODATA, data);
 				curl_easy_setopt (data->curl, CURLOPT_NOPROGRESS, false);
@@ -1420,20 +1438,23 @@ namespace lime {
 			}
 			case CURLOPT_READDATA:
 			{
-				curl_gc_mutex.Lock ();
+				// curl_gc_mutex.Lock ();
 
-				curl_easy_setopt (easy_handle, CURLOPT_SEEKFUNCTION, seek_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_SEEKDATA, data);
-				code = curl_easy_setopt (easy_handle, CURLOPT_READFUNCTION, read_callback);
-				curl_easy_setopt (easy_handle, CURLOPT_READDATA, data);
+				// curl_easy_setopt (easy_handle, CURLOPT_SEEKFUNCTION, seek_callback);
+				// curl_easy_setopt (easy_handle, CURLOPT_SEEKDATA, data);
+				// code = curl_easy_setopt (easy_handle, CURLOPT_READFUNCTION, read_callback);
+				// curl_easy_setopt (easy_handle, CURLOPT_READDATA, data);
 
-				curl_gc_mutex.Unlock ();
+				// curl_gc_mutex.Unlock ();
 				break;
 			}
 			case CURLOPT_WRITEFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->writeCallback) {
+					delete data->writeCallback;
+				}
+				data->writeCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (easy_handle, type, write_callback);
 				curl_easy_setopt (easy_handle, CURLOPT_WRITEDATA, data);
 
@@ -1443,7 +1464,10 @@ namespace lime {
 			case CURLOPT_HEADERFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->headerCallback) {
+					delete data->headerCallback;
+				}
+				data->headerCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (easy_handle, type, header_callback);
 				curl_easy_setopt (easy_handle, CURLOPT_HEADERDATA, data);
 
@@ -1453,7 +1477,10 @@ namespace lime {
 			case CURLOPT_PROGRESSFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->progressCallback) {
+					delete data->progressCallback;
+				}
+				data->progressCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (easy_handle, type, progress_callback);
 				curl_easy_setopt (easy_handle, CURLOPT_PROGRESSDATA, data);
 				curl_easy_setopt (easy_handle, CURLOPT_NOPROGRESS, false);
@@ -1464,7 +1491,10 @@ namespace lime {
 			case CURLOPT_XFERINFOFUNCTION:
 			{
 				curl_gc_mutex.Lock ();
-
+				if(data->xferInfoCallback) {
+					delete data->xferInfoCallback;
+				}
+				data->xferInfoCallback = new ValuePointer(parameter);
 				code = curl_easy_setopt (easy_handle, type, xferinfo_callback);
 				curl_easy_setopt (easy_handle, CURLOPT_XFERINFODATA, data);
 				curl_easy_setopt (easy_handle, CURLOPT_NOPROGRESS, false);
@@ -1535,7 +1565,7 @@ namespace lime {
 
 	value lime_curl_easy_unescape (value curl, HxString url, int inlength, int outlength) {
 
-		char* result = curl_easy_unescape ((CURL*)val_data(curl), url.__s, inlength, &outlength);
+		char* result = curl_easy_unescape (CURLData::fromCFFI(curl)->curl, url.__s, inlength, &outlength);
 		return result ? alloc_string (result) : alloc_null ();
 
 	}
@@ -1543,7 +1573,7 @@ namespace lime {
 
 	HL_PRIM vbyte* HL_NAME(hl_curl_easy_unescape) (HL_CFFIPointer* curl, hl_vstring* url, int inlength, int outlength) {
 
-		char* result = curl_easy_unescape ((CURL*)curl->ptr, url ? hl_to_utf8 (url->bytes) : NULL, inlength, &outlength);
+		char* result = curl_easy_unescape (CURLData::fromCFFI(curl)->curl, url ? hl_to_utf8 (url->bytes) : NULL, inlength, &outlength);
 		int length = strlen (result);
 		char* _result = (char*)malloc (length + 1);
 		strcpy (_result, result);
@@ -1744,17 +1774,17 @@ namespace lime {
 
 
 	int lime_curl_multi_perform (value multi_handle) {
-		System::GCEnterBlocking();
+		// System::GCEnterBlocking();
 		auto code = CURLMultiData::fromCFFI(multi_handle)->Perform();
-		System::GCExitBlocking();
+		// System::GCExitBlocking();
 		return code;
 	}
 
 
 	HL_PRIM int HL_NAME(hl_curl_multi_perform) (HL_CFFIPointer* multi_handle) {
-		hl_blocking(true);
+		// hl_blocking(true);
 		auto code = CURLMultiData::fromCFFI(multi_handle)->Perform();
-		hl_blocking(false);
+		// hl_blocking(false);
 		return code;
 	}
 

@@ -395,7 +395,7 @@ class NativeHTTPRequest
 	private function curl_onWrite(curl:CURL, output:Bytes):Int
 	{
 		buffer.addBytes(output, 0, output.length);
-
+		trace(output.length);
 		return output.length;
 	}
 
@@ -524,7 +524,7 @@ class NativeHTTPRequest
 
 					multi.removeHandle(curl);
 					curl.cleanup();
-
+					trace(curl, status, cookieList);
 					multiThreadPool.sendProgress({curl: curl, result: message.result, status: status});
 					message = multi.infoRead();
 				}

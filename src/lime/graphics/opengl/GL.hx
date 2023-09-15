@@ -2606,12 +2606,14 @@ class GL
 @:dox(hide) @:noCompletion class GLObject
 {
 	@:noCompletion private var id:Int;
+	@:noCompletion private var type:GLObjectType;
 	@:noCompletion private var ptr:#if (lime_cffi && (lime_opengl || lime_opengles) && !macro) CFFIPointer #else Dynamic #end;
 	@:noCompletion private var refs:Array<GLObject>;
 
-	@:noCompletion private function new(id:Int)
+	@:noCompletion private function new(id:Int, type:GLObjectType)
 	{
 		this.id = id;
+		this.type = type;
 	}
 
 	public static function fromInt(type:GLObjectType, id:Int):GLObject
@@ -2626,7 +2628,7 @@ class GL
 			return object;
 		}
 
-		object = new GLObject(id);
+		object = new GLObject(id, type);
 		object.ptr = NativeCFFI.lime_gl_object_register(id, type, object);
 		return object;
 		#else
