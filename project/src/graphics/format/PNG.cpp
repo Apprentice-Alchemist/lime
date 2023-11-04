@@ -19,6 +19,7 @@ namespace lime {
 
 	struct ReadBuffer {
 
+		ReadBuffer(): data(nullptr), length(0), position(0) {}
 		ReadBuffer (const unsigned char* data, int length) : data (data), length (length), position (0) {}
 
 		bool Read (unsigned char* out, int count) {
@@ -137,6 +138,8 @@ namespace lime {
 
 		}
 
+		ReadBuffer buffer;
+
 		if (file) {
 
 			if (file->isFile ()) {
@@ -148,14 +151,14 @@ namespace lime {
 
 				data = new Bytes ();
 				data->ReadFile (resource->path);
-				ReadBuffer buffer (data->b, data->length);
+				buffer = ReadBuffer(data->b, data->length);
 				png_set_read_fn (png_ptr, &buffer, user_read_data_fn);
 
 			}
 
 		} else {
 
-			ReadBuffer buffer (resource->data->b, resource->data->length);
+			buffer = ReadBuffer(resource->data->b, resource->data->length);
 			png_set_read_fn (png_ptr, &buffer, user_read_data_fn);
 
 		}

@@ -18,7 +18,7 @@ namespace lime {
 	static int id_y;
 	static bool init = false;
 	cairo_user_data_key_t userData;
-	Mutex cairoObjects_Mutex;
+	// Mutex cairoObjects_Mutex;
 
 
 	struct HL_CairoGlyph {
@@ -33,12 +33,12 @@ namespace lime {
 
 	void gc_cairo (value handle) {
 
-		if (!val_is_null (handle)) {
+		// if (!val_is_null (handle)) {
 
-			cairo_t* cairo = (cairo_t*)val_data (handle);
-			cairo_destroy (cairo);
+		// 	cairo_t* cairo = (cairo_t*)val_data (handle);
+		// 	cairo_destroy (cairo);
 
-		}
+		// }
 
 	}
 
@@ -54,12 +54,12 @@ namespace lime {
 
 	void gc_cairo_font_face (value handle) {
 
-		if (!val_is_null (handle)) {
+		// if (!val_is_null (handle)) {
 
-			cairo_font_face_t* face = (cairo_font_face_t*)val_data (handle);
-			cairo_font_face_destroy (face);
+		// 	cairo_font_face_t* face = (cairo_font_face_t*)val_data (handle);
+		// 	cairo_font_face_destroy (face);
 
-		}
+		// }
 
 	}
 
@@ -75,12 +75,12 @@ namespace lime {
 
 	void gc_cairo_font_options (value handle) {
 
-		if (!val_is_null (handle)) {
+		// if (!val_is_null (handle)) {
 
-			cairo_font_options_t* options = (cairo_font_options_t*)val_data (handle);
-			cairo_font_options_destroy (options);
+		// 	cairo_font_options_t* options = (cairo_font_options_t*)val_data (handle);
+		// 	cairo_font_options_destroy (options);
 
-		}
+		// }
 
 	}
 
@@ -96,12 +96,12 @@ namespace lime {
 
 	void gc_cairo_pattern (value handle) {
 
-		if (!val_is_null (handle)) {
+		// if (!val_is_null (handle)) {
 
-			cairo_pattern_t* pattern = (cairo_pattern_t*)val_data (handle);
-			cairo_pattern_destroy (pattern);
+		// 	cairo_pattern_t* pattern = (cairo_pattern_t*)val_data (handle);
+		// 	cairo_pattern_destroy (pattern);
 
-		}
+		// }
 
 	}
 
@@ -117,12 +117,12 @@ namespace lime {
 
 	void gc_cairo_surface (value handle) {
 
-		if (!val_is_null (handle)) {
+		// if (!val_is_null (handle)) {
 
-			cairo_surface_t* surface = (cairo_surface_t*)val_data (handle);
-			cairo_surface_destroy (surface);
+		// 	cairo_surface_t* surface = (cairo_surface_t*)val_data (handle);
+		// 	cairo_surface_destroy (surface);
 
-		}
+		// }
 
 	}
 

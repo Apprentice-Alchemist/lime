@@ -5567,7 +5567,7 @@ namespace lime {
 	#define _TBYTES _OBJ (_I32 _BYTES)
 	#define _TCFFIPOINTER _DYN
 
-	#define _TGLOBJECT _OBJ (_I32 _TCFFIPOINTER _OBJ (_I32 _ARR))
+	#define _TGLOBJECT _OBJ (_I32 _I32 _TCFFIPOINTER _OBJ (_I32 _ARR))
 
 
 	DEFINE_HL_PRIM (_VOID, hl_gl_active_texture, _I32);
